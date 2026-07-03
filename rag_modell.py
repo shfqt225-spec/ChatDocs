@@ -24,7 +24,7 @@ def _create_supabase_client() -> Client:
 
 
 def _create_embeddings() -> HuggingFaceEmbeddings:
-    return HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+    return HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
 
 def _create_vector_store() -> SupabaseVectorStore:
     return SupabaseVectorStore(
