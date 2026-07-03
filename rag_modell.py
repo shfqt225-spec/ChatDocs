@@ -22,11 +22,8 @@ def _create_supabase_client() -> Client:
     return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SECRET_KEY"))
 
 
-def _create_embeddings() -> GoogleGenerativeAIEmbeddings:
-    return GoogleGenerativeAIEmbeddings(
-        model="models/gemini-embedding-001",
-        google_api_key=os.getenv("GOOGLE_API_KEY"),
-    )
+def _create_embeddings() -> HuggingFaceEmbeddings:
+    return HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
 
 def _create_vector_store() -> SupabaseVectorStore:
     return SupabaseVectorStore(
