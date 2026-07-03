@@ -1,5 +1,4 @@
 from supabase import Client, create_client
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import SupabaseVectorStore
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -10,7 +9,7 @@ from langchain_experimental.text_splitter import SemanticChunker
 from operator import itemgetter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
-from typing import List
+from typing import List, Optional
 from langchain_core.documents import Document
 from dotenv import load_dotenv
 import os
@@ -19,12 +18,22 @@ load_dotenv()
 
 TOP_K = 4
 
+# the embedding model is loaded once, the first time it's needed, and reused
+# for every request after that - it is NOT rebuilt on every upload, chat, or
+# delete call. reloading bge on every request was the direct cause of the
+# repeated memory spikes / OOM crashes seen on railway.
+_embeddings_instance: Optional[HuggingFaceEmbeddings] = None
+
+
 def _create_supabase_client() -> Client:
     return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SECRET_KEY"))
 
 
 def _create_embeddings() -> HuggingFaceEmbeddings:
-    return HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    global _embeddings_instance
+    if _embeddings_instance is None:
+        _embeddings_instance = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    return _embeddings_instance
 
 def _create_vector_store() -> SupabaseVectorStore:
     return SupabaseVectorStore(
