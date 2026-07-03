@@ -11,9 +11,12 @@ from supabase import create_client
 from rag_modell import (
     build_rag_chain,
     delete_document,
+    get_or_create_thread,
+    get_thread_messages,
     ingest_document,
     list_documents,
     query,
+    save_message,
 )
 
 app = FastAPI(title="ChatDocs RAG API")
@@ -49,6 +52,7 @@ def get_current_user_id(creds: HTTPAuthorizationCredentials = Depends(_bearer)) 
 
 
 class ChatRequest(BaseModel):
+    doc_id: str
     question: str
 
 
@@ -81,12 +85,35 @@ async def upload(
 @app.post("/chat")
 async def chat(payload: ChatRequest, user_id: str = Depends(get_current_user_id)):
     try:
-        chain = build_rag_chain(user_id)
+        chain = build_rag_chain(user_id, payload.doc_id)
         result = query(chain, payload.question)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
+    # the answer is already generated at this point - if saving history
+    # fails, the user still gets their answer, they just won't see this
+    # exchange in their thread later. that's a reasonable trade rather
+    # than failing a successful answer over a logging problem.
+    try:
+        documents = list_documents(user_id)
+        filename = next((d["filename"] for d in documents if d["doc_id"] == payload.doc_id), "document")
+        thread_id = get_or_create_thread(user_id, payload.doc_id, filename)
+        save_message(thread_id, "user", payload.question)
+        save_message(thread_id, "assistant", result["answer"], provider=result["provider"], sources=result["sources"])
+    except Exception:
+        pass
+
     return result
+
+
+@app.get("/chat/{doc_id}/history")
+async def get_chat_history(doc_id: str, user_id: str = Depends(get_current_user_id)):
+    try:
+        messages = get_thread_messages(user_id, doc_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"messages": messages}
 
 
 @app.get("/documents")
