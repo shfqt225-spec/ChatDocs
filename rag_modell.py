@@ -179,7 +179,7 @@ question:
 {question}
 """)
 
-def build_rag_chain(user_id: str):
+def build_rag_chain(user_id: str, doc_id: str):
 
     vector_store = _create_vector_store()
 
@@ -188,6 +188,7 @@ def build_rag_chain(user_id: str):
             "k": TOP_K,
             "filter": {
                 "user_id": user_id,
+                "doc_id": doc_id,
             },
         }
     )
@@ -337,3 +338,68 @@ def query(chain, question: str) -> dict:
         "provider": result["provider"],
         "sources": sources,
     }
+
+
+def get_or_create_thread(user_id: str, doc_id: str, filename: str) -> str:
+    """
+    each document has exactly one ongoing conversation per user. returns
+    the existing thread id if one exists, otherwise creates one.
+    """
+    client = _create_supabase_client()
+    existing = (
+        client.table("chat_threads")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("doc_id", doc_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        return existing.data[0]["id"]
+
+    created = (
+        client.table("chat_threads")
+        .insert({"user_id": user_id, "doc_id": doc_id, "filename": filename})
+        .execute()
+    )
+    return created.data[0]["id"]
+
+
+def save_message(thread_id: str, role: str, content: str, provider: str | None = None, sources: list | None = None) -> None:
+    client = _create_supabase_client()
+    client.table("chat_messages").insert({
+        "thread_id": thread_id,
+        "role": role,
+        "content": content,
+        "provider": provider,
+        "sources": sources,
+    }).execute()
+
+
+def get_thread_messages(user_id: str, doc_id: str) -> list[dict]:
+    """
+    returns every message in this user's conversation for one document,
+    oldest first. returns an empty list if no conversation exists yet -
+    that's a normal state, not an error.
+    """
+    client = _create_supabase_client()
+    thread = (
+        client.table("chat_threads")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("doc_id", doc_id)
+        .limit(1)
+        .execute()
+    )
+    if not thread.data:
+        return []
+
+    thread_id = thread.data[0]["id"]
+    messages = (
+        client.table("chat_messages")
+        .select("role, content, provider, sources, created_at")
+        .eq("thread_id", thread_id)
+        .order("created_at")
+        .execute()
+    )
+    return messages.data or []
