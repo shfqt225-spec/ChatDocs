@@ -64,14 +64,14 @@ def _split_documents(docs: List[Document]) -> List[Document]:
     return splitter.split_documents(docs)
 
 
-def ingest_document(file_path:str, user_id: str, doc_id:str)-> int:
+def ingest_document(file_path:str, user_id: str, doc_id:str, original_filename: str | None = None)-> int:
 
     raw_docs= _load_file(file_path)
 
     for doc in raw_docs:
         doc.metadata["user_id"]= user_id
         doc.metadata["doc_id"]= doc_id
-        doc.metadata["filename"]= os.path.basename(file_path)
+        doc.metadata["filename"]= original_filename or os.path.basename(file_path)
 
     chunks= _split_documents(raw_docs)
     vector_store= _create_vector_store()
@@ -89,6 +89,37 @@ def delete_document(doc_id: str, user_id: str) -> None:
         "metadata->>doc_id": doc_id,
         "metadata->>user_id": user_id,
     }).execute()
+
+
+def list_documents(user_id: str) -> List[dict]:
+    """
+    returns one entry per uploaded document (not per chunk), scoped to the
+    requesting user. a document may have many chunk rows in supabase, so
+    this groups by doc_id and reports the chunk count alongside each one.
+    """
+    client = _create_supabase_client()
+    response = (
+        client.table("documents")
+        .select("metadata")
+        .eq("metadata->>user_id", user_id)
+        .execute()
+    )
+
+    grouped: dict[str, dict] = {}
+    for row in response.data or []:
+        metadata = row.get("metadata") or {}
+        doc_id = metadata.get("doc_id")
+        if not doc_id:
+            continue
+        if doc_id not in grouped:
+            grouped[doc_id] = {
+                "doc_id": doc_id,
+                "filename": metadata.get("filename", "unknown"),
+                "chunk_count": 0,
+            }
+        grouped[doc_id]["chunk_count"] += 1
+
+    return list(grouped.values())
 
 def _build_llm_candidates() -> List[tuple]:
     return [
