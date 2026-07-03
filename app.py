@@ -12,6 +12,7 @@ from rag_modell import (
     build_rag_chain,
     delete_document,
     ingest_document,
+    list_documents,
     query,
 )
 
@@ -63,7 +64,12 @@ async def upload(
         tmp_path = tmp.name
 
     try:
-        chunks = ingest_document(tmp_path, user_id=user_id, doc_id=doc_id)
+        chunks = ingest_document(
+            tmp_path,
+            user_id=user_id,
+            doc_id=doc_id,
+            original_filename=file.filename,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     finally:
@@ -81,6 +87,16 @@ async def chat(payload: ChatRequest, user_id: str = Depends(get_current_user_id)
         raise HTTPException(status_code=500, detail=str(exc))
 
     return result
+
+
+@app.get("/documents")
+async def get_documents(user_id: str = Depends(get_current_user_id)):
+    try:
+        documents = list_documents(user_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {"documents": documents}
 
 
 @app.delete("/document/{doc_id}")
