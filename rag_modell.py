@@ -18,6 +18,12 @@ load_dotenv()
 
 TOP_K = 4
 
+# tracks in-progress/completed background uploads by doc_id, so /upload can
+# return immediately and the client can poll status separately instead of
+# holding one http request open for the entire ingestion (which is what
+# was causing 502s on large documents).
+UPLOAD_STATUS: dict[str, dict] = {}
+
 # the embedding model is loaded once, the first time it's needed, and reused
 # for every request after that - it is NOT rebuilt on every upload, chat, or
 # delete call. reloading bge on every request was the direct cause of the
@@ -77,6 +83,29 @@ def ingest_document(file_path:str, user_id: str, doc_id:str, original_filename: 
     vector_store= _create_vector_store()
     vector_store.add_documents(chunks)
     return len(chunks)
+
+
+def ingest_document_background(file_path: str, user_id: str, doc_id: str, original_filename: str | None = None) -> None:
+    """
+    same work as ingest_document, but runs as a background task and writes
+    its outcome into UPLOAD_STATUS instead of returning it - this is what
+    lets /upload respond immediately instead of blocking on a large file's
+    entire chunking + embedding pass. the caller (app.py) polls
+    GET /upload/{doc_id}/status to find out when it's actually done.
+    the temp file is cleaned up here, once ingestion actually finishes,
+    since the request that created it has already returned by then.
+    """
+    UPLOAD_STATUS[doc_id] = {"state": "processing", "chunks": None, "error": None}
+    try:
+        chunks = ingest_document(file_path, user_id=user_id, doc_id=doc_id, original_filename=original_filename)
+        UPLOAD_STATUS[doc_id] = {"state": "done", "chunks": chunks, "error": None}
+    except Exception as exc:
+        UPLOAD_STATUS[doc_id] = {"state": "error", "chunks": None, "error": str(exc)}
+    finally:
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
 
 
 
