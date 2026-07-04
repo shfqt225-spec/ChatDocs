@@ -2,18 +2,20 @@ import os
 import shutil
 import tempfile
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from supabase import create_client
 
 from rag_modell import (
+    UPLOAD_STATUS,
     build_rag_chain,
     delete_document,
     get_or_create_thread,
     get_thread_messages,
-    ingest_document,
+    ingest_document_background,
     list_documents,
     query,
     save_message,
@@ -58,6 +60,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/upload")
 async def upload(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     doc_id: str = Form(...),
     user_id: str = Depends(get_current_user_id),
@@ -67,26 +70,39 @@ async def upload(
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
-    try:
-        chunks = ingest_document(
-            tmp_path,
-            user_id=user_id,
-            doc_id=doc_id,
-            original_filename=file.filename,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    finally:
-        os.remove(tmp_path)
+    # returns immediately - chunking + embedding a large document can take
+    # long enough to exceed railway's request timeout (this is what caused
+    # 502s on the 60-page test), so ingestion runs in the background and
+    # the client polls /upload/{doc_id}/status instead of waiting on this
+    # request. the temp file is cleaned up inside the background task,
+    # once it's actually done reading the file.
+    background_tasks.add_task(
+        ingest_document_background,
+        tmp_path,
+        user_id,
+        doc_id,
+        file.filename,
+    )
 
-    return {"status": "success", "chunks": chunks}
+    return {"status": "processing", "doc_id": doc_id}
+
+
+@app.get("/upload/{doc_id}/status")
+async def upload_status(doc_id: str, user_id: str = Depends(get_current_user_id)):
+    status = UPLOAD_STATUS.get(doc_id)
+    if status is None:
+        # either it hasn't started, doc_id is wrong, or the server
+        # restarted since the upload was queued (this status is in
+        # memory only, not persisted)
+        raise HTTPException(status_code=404, detail="no upload found for this doc_id")
+    return status
 
 
 @app.post("/chat")
 async def chat(payload: ChatRequest, user_id: str = Depends(get_current_user_id)):
     try:
-        chain = build_rag_chain(user_id, payload.doc_id)
-        result = query(chain, payload.question)
+        chain = await run_in_threadpool(build_rag_chain, user_id, payload.doc_id)
+        result = await run_in_threadpool(query, chain, payload.question)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -95,11 +111,13 @@ async def chat(payload: ChatRequest, user_id: str = Depends(get_current_user_id)
     # exchange in their thread later. that's a reasonable trade rather
     # than failing a successful answer over a logging problem.
     try:
-        documents = list_documents(user_id)
+        documents = await run_in_threadpool(list_documents, user_id)
         filename = next((d["filename"] for d in documents if d["doc_id"] == payload.doc_id), "document")
-        thread_id = get_or_create_thread(user_id, payload.doc_id, filename)
-        save_message(thread_id, "user", payload.question)
-        save_message(thread_id, "assistant", result["answer"], provider=result["provider"], sources=result["sources"])
+        thread_id = await run_in_threadpool(get_or_create_thread, user_id, payload.doc_id, filename)
+        await run_in_threadpool(save_message, thread_id, "user", payload.question)
+        await run_in_threadpool(
+            save_message, thread_id, "assistant", result["answer"], result["provider"], result["sources"]
+        )
     except Exception:
         pass
 
@@ -109,7 +127,7 @@ async def chat(payload: ChatRequest, user_id: str = Depends(get_current_user_id)
 @app.get("/chat/{doc_id}/history")
 async def get_chat_history(doc_id: str, user_id: str = Depends(get_current_user_id)):
     try:
-        messages = get_thread_messages(user_id, doc_id)
+        messages = await run_in_threadpool(get_thread_messages, user_id, doc_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -119,7 +137,7 @@ async def get_chat_history(doc_id: str, user_id: str = Depends(get_current_user_
 @app.get("/documents")
 async def get_documents(user_id: str = Depends(get_current_user_id)):
     try:
-        documents = list_documents(user_id)
+        documents = await run_in_threadpool(list_documents, user_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -129,7 +147,7 @@ async def get_documents(user_id: str = Depends(get_current_user_id)):
 @app.delete("/document/{doc_id}")
 async def remove_document(doc_id: str, user_id: str = Depends(get_current_user_id)):
     try:
-        delete_document(doc_id, user_id=user_id)
+        await run_in_threadpool(delete_document, doc_id, user_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
